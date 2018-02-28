@@ -26,6 +26,7 @@ import com.amazonaws.services.identitymanagement.model.*;
 import com.denismo.apacheds.ApacheDSUtils;
 import com.denismo.apacheds.Runner;
 import com.denismo.apacheds.auth.AWSIAMAuthenticator;
+import org.apache.commons.codec.binary.Base64;
 import org.apache.directory.api.ldap.model.constants.SchemaConstants;
 import org.apache.directory.api.ldap.model.cursor.CursorException;
 import org.apache.directory.api.ldap.model.entry.*;
@@ -47,9 +48,20 @@ import org.apache.directory.server.core.api.normalization.FilterNormalizingVisit
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.IllegalArgumentException;
 import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
-import java.util.*;
+import java.util.List;
+import java.util.UUID;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -66,6 +78,9 @@ public class LDAPIAMPoller {
     private static final Object ID_LOCK = new Object();
     public static final String ID_GENERATOR = "ads-dsSyncPeriodMillis";
     public static final String MEMBER_OF = "memberOf";
+
+    private static final String CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    private static SecureRandom rnd = new SecureRandom();
 
     private AWSCredentialsProvider credentials;
     private DirectoryService directory;
@@ -123,7 +138,7 @@ public class LDAPIAMPoller {
                 configEntry.put(ID_GENERATOR, "1000");
                 directory.getAdminSession().add(configEntry);
             } else {
-                LookupOperationContext lookupContext = new LookupOperationContext( directory.getAdminSession(),
+                LookupOperationContext lookupContext = new LookupOperationContext(directory.getAdminSession(),
                         configDn,
                         SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
                 configEntry = directory.getPartitionNexus().lookup(lookupContext);
@@ -166,8 +181,8 @@ public class LDAPIAMPoller {
         Dn dn = directory.getDnFactory().create(dnStr);
         dn.apply(directory.getSchemaManager());
         ExprNode filter = FilterParser.parse(directory.getSchemaManager(), "(ObjectClass=*)");
-        NameComponentNormalizer ncn = new ConcreteNameComponentNormalizer( directory.getSchemaManager() );
-        FilterNormalizingVisitor visitor = new FilterNormalizingVisitor( ncn, directory.getSchemaManager() );
+        NameComponentNormalizer ncn = new ConcreteNameComponentNormalizer(directory.getSchemaManager());
+        FilterNormalizingVisitor visitor = new FilterNormalizingVisitor(ncn, directory.getSchemaManager());
         filter.accept(visitor);
         SearchOperationContext context = new SearchOperationContext(directory.getAdminSession(),
                 dn, SearchScope.SUBTREE, filter, SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
@@ -182,7 +197,7 @@ public class LDAPIAMPoller {
         cursor.close();
 
         LOG.debug("Deleting " + dns.size() + " items from under " + dnStr);
-        for (Dn deleteDn: dns) {
+        for (Dn deleteDn : dns) {
             directory.getAdminSession().delete(deleteDn);
         }
     }
@@ -286,6 +301,7 @@ public class LDAPIAMPoller {
         ent.put("shadowMax", "999999");
         ent.put("loginshell", "/bin/bash");
         ent.put("homedirectory", "/home/" + role.getRoleName());
+        ent.put("userPassword", createRandomPassword());
         add(ent);
 
         directory.getAdminSession().modify(roleGroup.getDn(),
@@ -293,11 +309,11 @@ public class LDAPIAMPoller {
     }
 
     private Entry getExistingRole(Role role) throws LdapException {
-        LookupOperationContext lookupContext = new LookupOperationContext( directory.getAdminSession(),
+        LookupOperationContext lookupContext = new LookupOperationContext(directory.getAdminSession(),
                 directory.getDnFactory().create(String.format(ROLE_FMT, role.getRoleName())), SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
 
         try {
-            Entry roleEntry = directory.getPartitionNexus().lookup( lookupContext );
+            Entry roleEntry = directory.getPartitionNexus().lookup(lookupContext);
             if (roleEntry != null && roleEntry.hasObjectClass("iamaccount")) {
                 return roleEntry;
             }
@@ -354,8 +370,8 @@ public class LDAPIAMPoller {
             Dn dn = directory.getDnFactory().create(rootDN);
             dn.apply(directory.getSchemaManager());
             ExprNode filter = FilterParser.parse(directory.getSchemaManager(), String.format("(ObjectClass=%s)", className));
-            NameComponentNormalizer ncn = new ConcreteNameComponentNormalizer( directory.getSchemaManager() );
-            FilterNormalizingVisitor visitor = new FilterNormalizingVisitor( ncn, directory.getSchemaManager() );
+            NameComponentNormalizer ncn = new ConcreteNameComponentNormalizer(directory.getSchemaManager());
+            FilterNormalizingVisitor visitor = new FilterNormalizingVisitor(ncn, directory.getSchemaManager());
             filter.accept(visitor);
             SearchOperationContext context = new SearchOperationContext(directory.getAdminSession(),
                     dn, SearchScope.SUBTREE, filter, SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
@@ -394,15 +410,16 @@ public class LDAPIAMPoller {
         add(group);
         return group;
     }
+
     private Entry getExistingGroup(Group iamGroup) throws Exception {
         Dn dn = directory.getDnFactory().create(String.format(GROUP_FMT, iamGroup.getGroupName()));
 
-        LookupOperationContext lookupContext = new LookupOperationContext( directory.getAdminSession(),
+        LookupOperationContext lookupContext = new LookupOperationContext(directory.getAdminSession(),
                 dn,
                 SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
 
         try {
-            Entry groupEntry = directory.getPartitionNexus().lookup( lookupContext );
+            Entry groupEntry = directory.getPartitionNexus().lookup(lookupContext);
             if (groupEntry != null && groupEntry.hasObjectClass("iamgroup")) {
                 return groupEntry;
             }
@@ -426,7 +443,7 @@ public class LDAPIAMPoller {
             String newID;
             try {
                 lastID = Integer.parseInt(configEntry.get(ID_GENERATOR).getString());
-                newID = String.valueOf(lastID+1);
+                newID = String.valueOf(lastID + 1);
                 directory.getAdminSession().modify(configEntry.getDn(),
                         new DefaultModification(ModificationOperation.REPLACE_ATTRIBUTE, ID_GENERATOR, newID)
                 );
@@ -497,7 +514,7 @@ public class LDAPIAMPoller {
         for (Entry group : allGroups) {
             try {
                 List<Modification> deletions = new ArrayList<Modification>();
-                for (String userUid: toBeDeleted) {
+                for (String userUid : toBeDeleted) {
                     if (group.contains("memberUid", userUid)) {
                         deletions.add(new DefaultModification(ModificationOperation.REMOVE_ATTRIBUTE, "memberUid", userUid));
                     }
@@ -565,10 +582,44 @@ public class LDAPIAMPoller {
         ent.put("loginshell", "/bin/bash");
         ent.put("homedirectory", "/home/" + user.getUserName());
         ent.put("accountNumber", getAccountNumber(user.getArn()));
-
+        ent.put("userPassword", createRandomPassword());
         setMemberOf(ent, otherGroups);
 
         add(ent);
+    }
+
+    private String createRandomPassword() {
+        String algorithm = "SHA-256";
+        // Check if password arg is string or byte[]
+        byte[] data = createRandomString(8).getBytes();
+        // create message digest object
+        MessageDigest digest = null;
+        Base64 base64 = new Base64();
+        try {
+            digest = MessageDigest.getInstance(algorithm);
+        } catch (NoSuchAlgorithmException nsae) {
+            throw new IllegalArgumentException(nsae.getMessage());
+        }
+
+        // calculate hashed value of password
+        byte[] fingerPrint = digest.digest(data);
+        byte[] encoded = base64.encodeBase64(fingerPrint);
+
+        // create return result of form "{alg}bbbbbbb"
+        StringBuffer result = new StringBuffer();
+        result.append('{');
+        result.append(algorithm);
+        result.append('}');
+        result.append(encoded);
+        return result.toString();
+    }
+
+    private String createRandomString(int len) {
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) {
+            sb.append(CHARSET.charAt(rnd.nextInt(CHARSET.length())));
+        }
+        return sb.toString();
     }
 
     private void updateUserMemberOf(Entry existingUser, Collection<Group> otherGroups) {
@@ -625,8 +676,9 @@ public class LDAPIAMPoller {
 
     /**
      * Updates the list of users in each specified group, to include the new user.
+     *
      * @param groups the list of groups to update
-     * @param user the discovered user
+     * @param user   the discovered user
      */
 
     private void updateGroups(Collection<Group> groups, User user) {
@@ -661,6 +713,7 @@ public class LDAPIAMPoller {
     }
 
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("arn:aws:iam::(\\d+):user/.*");
+
     private String getAccountNumber(String arn) {
         Matcher result = ACCOUNT_PATTERN.matcher(arn);
         if (result.matches()) {
@@ -670,11 +723,11 @@ public class LDAPIAMPoller {
     }
 
     private Entry getExistingUser(User user) throws LdapException {
-        LookupOperationContext lookupContext = new LookupOperationContext( directory.getAdminSession(),
+        LookupOperationContext lookupContext = new LookupOperationContext(directory.getAdminSession(),
                 directory.getDnFactory().create(String.format(USER_FMT, user.getUserName())), SchemaConstants.ALL_USER_ATTRIBUTES, SchemaConstants.ALL_OPERATIONAL_ATTRIBUTES);
 
         try {
-            Entry userEntry = directory.getPartitionNexus().lookup( lookupContext );
+            Entry userEntry = directory.getPartitionNexus().lookup(lookupContext);
             if (userEntry != null && userEntry.hasObjectClass("iamaccount")) {
                 return userEntry;
             }

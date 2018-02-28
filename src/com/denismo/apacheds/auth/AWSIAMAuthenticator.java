@@ -53,6 +53,7 @@ public class AWSIAMAuthenticator extends AbstractAuthenticator {
         public static final String PASSWORD_VALIDATOR = "iam_password";
         public static final String SECRET_KEY_VALIDATOR = "iam_secret_key";
         public static final String DUAL_VALIDATOR = "iam_dual";
+        public static final String SIMPLE = "simple";
         public String rootDN = "dc=iam,dc=aws,dc=org";
         public int pollPeriod = 600;
         public String validator = "iam_secret_key";
@@ -60,6 +61,7 @@ public class AWSIAMAuthenticator extends AbstractAuthenticator {
         public boolean isPasswordLogin() { return PASSWORD_VALIDATOR.equals(validator); }
         public boolean isSecretKeyLogin() { return SECRET_KEY_VALIDATOR.equals(validator); }
         public boolean isDualLogin() { return DUAL_VALIDATOR.equals(validator); }
+        public boolean isSimpleLogin() { return SIMPLE.equals(validator); }
     }
 
     private static Config s_config;
@@ -136,6 +138,8 @@ public class AWSIAMAuthenticator extends AbstractAuthenticator {
             validator = new IAMSecretKeyValidator();
         } else if (config.isDualLogin()) {
             validator = new IAMDualValidator();
+        } else if (config.isSimpleLogin()) {
+            validator = new IAMAccountPasswordValidator();
         } else {
             throw new LdapException("Unsupported validator mode: " + config.validator);
         }
@@ -143,7 +147,7 @@ public class AWSIAMAuthenticator extends AbstractAuthenticator {
 
     @Override
     public LdapPrincipal authenticate(BindOperationContext bindContext) throws Exception {
-        if (!isAWSAccount(bindContext) || disabled) {
+        if (!isAWSAccount(bindContext) || (isAWSAccount(bindContext) && getConfig().isSimpleLogin()) || disabled) {
             LOG.debug("Skipping " + bindContext.getDn() + " - not an AWS account");
             if (delegatedAuth == null) {
                 LOG.error("Delegated auth is null");
